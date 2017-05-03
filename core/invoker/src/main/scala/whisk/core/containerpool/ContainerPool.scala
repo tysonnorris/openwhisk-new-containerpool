@@ -16,8 +16,10 @@
 
 package whisk.core.containerpool
 
-import scala.collection.mutable
+import java.time.Instant
 
+import scala.collection.mutable
+import scala.concurrent.duration._
 import akka.actor.Actor
 import akka.actor.ActorRef
 import akka.actor.ActorRefFactory
@@ -50,6 +52,7 @@ class ContainerPool(
 
     val pool = new mutable.HashMap[ActorRef, WorkerData]
     val prewarmedPool = new mutable.HashMap[ActorRef, WorkerData]
+    val minimumRemovalAge = 1.seconds //min time since last use for removal eligibility
 
     prewarmConfig.foreach { config =>
         logging.info(this, s"pre-warming ${config.count} ${config.exec.kind} containers")
@@ -70,8 +73,10 @@ class ContainerPool(
                     }
                 } else None
             }.orElse {
-                // Remove a container and create a new one for the given job
-                ContainerPool.remove(r.msg.user.namespace, pool.toMap).map { toDelete =>
+                // Remove a container whose last use is before lastUseBefore
+                // and create a new one for the given job
+                val lastUseBefore = Instant.now.minusSeconds(minimumRemovalAge.toSeconds)
+                ContainerPool.remove(r.msg.user.namespace, pool.toMap, lastUseBefore).map { toDelete =>
                     removeContainer(toDelete)
                     createContainer()
                 }
@@ -178,9 +183,9 @@ object ContainerPool {
      * @param pool a map of all containers in the pool
      * @return a container to be removed iff found
      */
-    def remove[A](namespace: EntityName, pool: Map[A, WorkerData]): Option[A] = {
+    def remove[A](namespace: EntityName, pool: Map[A, WorkerData], lastUseBefore:Instant): Option[A] = {
         val grouped = pool.collect {
-            case (ref, WorkerData(w: WarmedData, _)) => ref -> w
+            case (ref, WorkerData(w: WarmedData, _)) if w.lastUsed.toEpochMilli < lastUseBefore.toEpochMilli  => ref -> w
         }.groupBy {
             case (ref, data) => data.namespace
         }
