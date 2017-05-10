@@ -23,20 +23,22 @@ import akka.actor.ActorSystem
 import whisk.common.Logging
 import whisk.core.connector.ActivationMessage
 import whisk.common.TransactionId
-import scala.concurrent.Future
+
+import scala.concurrent.{Await, Future, Promise}
 import whisk.common.LoggingMarkers
 import whisk.core.entity._
 import whisk.core.containerpool.docker.DockerContainer
 import whisk.core.containerpool.docker.DockerClientWithFileAccess
 import whisk.core.containerpool.docker.RuncClient
-import whisk.core.container.{ ContainerPool => OldContainerPool }
+import whisk.core.container.{ContainerPool => OldContainerPool}
 import whisk.core.containerpool.Run
 import whisk.core.connector.MessageProducer
 import akka.actor.ActorRefFactory
 import whisk.core.containerpool.ContainerProxy
-import scala.concurrent.Await
+
 import scala.concurrent.duration._
 import whisk.core.connector.CompletionMessage
+
 import scala.util.Success
 import scala.util.Failure
 import whisk.core.containerpool.PrewarmingConfig
@@ -118,7 +120,7 @@ class InvokerReactive(
         activationFeed,
         Some(PrewarmingConfig(2, prewarmExec))))
 
-    override def onMessage(msg: ActivationMessage)(implicit transid: TransactionId): Future[Unit] = {
+    def onMessage(msg: ActivationMessage,listener:Option[ActorRef] = None)(implicit transid: TransactionId): Future[Unit] = {
         require(msg != null, "message undefined")
         require(msg.action.version.isDefined, "action version undefined")
 
@@ -137,10 +139,11 @@ class InvokerReactive(
         if (actionid.rev == DocRevision()) {
             logging.error(this, s"revision was not provided for ${actionid.id}")
         }
+        val response = Promise[WhiskActivation]
         WhiskAction.get(entityStore, actionid.id, actionid.rev, fromCache = actionid.rev != DocRevision()).map { action =>
             // only Exec instances that are subtypes of CodeExec reach the invoker
             assume(action.exec.isInstanceOf[CodeExec[_]])
-            pool ! Run(action.toExecutableWhiskAction, msg)
+            pool ! Run(action.toExecutableWhiskAction, msg, listener)
         }.recover {
             case _ =>
                 val interval = Interval.zero
@@ -164,5 +167,4 @@ class InvokerReactive(
                 store(msg.transid, activation)
         }
     }
-
 }

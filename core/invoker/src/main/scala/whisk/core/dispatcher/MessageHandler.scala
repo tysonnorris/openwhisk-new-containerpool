@@ -16,9 +16,11 @@
 
 package whisk.core.dispatcher
 
+import akka.actor.ActorRef
+
 import scala.concurrent.Future
 import whisk.common.TransactionId
-import whisk.core.connector.{ ActivationMessage => Message }
+import whisk.core.connector.{ActivationMessage => Message}
 
 /**
  * Abstract base class for a handler for a connector (e.g., Kafka) message.
@@ -34,5 +36,5 @@ abstract class MessageHandler(val name: String) {
      * @param transid the transaction id for the Kafka message
      * @return Future that executes the handler
      */
-    def onMessage(msg: Message)(implicit transid: TransactionId): Future[Any]
+    def onMessage(msg: Message,listener:Option[ActorRef] = None)(implicit transid: TransactionId): Future[Any]
 }

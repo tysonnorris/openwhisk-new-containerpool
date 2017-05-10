@@ -16,35 +16,26 @@
 
 package whisk.core.loadBalancer
 
-import java.time.{ Clock, Instant }
+import java.time.{Clock, Instant}
 import java.util.concurrent.atomic.AtomicInteger
 
-import scala.collection.concurrent.TrieMap
-import scala.concurrent.ExecutionContext
-import scala.concurrent.Future
-import scala.concurrent.Promise
-import scala.concurrent.TimeoutException
-import scala.concurrent.duration.DurationInt
-import scala.concurrent.duration.FiniteDuration
-import scala.util.Failure
-import scala.util.Success
-
-import akka.actor.ActorSystem
+import akka.actor.{ActorRefFactory, ActorSystem}
 import akka.pattern.ask
-import whisk.common.ConsulClient
-import whisk.common.Logging
-import whisk.common.LoggingMarkers
-import whisk.common.TransactionId
-import whisk.connector.kafka.KafkaConsumerConnector
-import whisk.connector.kafka.KafkaProducerConnector
-import whisk.core.WhiskConfig
-import whisk.core.WhiskConfig.{ consulServer, kafkaHost, loadbalancerActivationCountBeforeNextInvoker }
-import whisk.core.connector.{ ActivationMessage, CompletionMessage }
-import whisk.core.entity.{ ActivationId, CodeExec, WhiskAction, WhiskActivation }
-import whisk.core.connector.PingMessage
 import akka.util.Timeout
-import akka.actor.ActorRefFactory
+import spray.client.pipelining._
+import spray.http.HttpRequest
+import spray.httpx.SprayJsonSupport._
+import whisk.common.{ConsulClient, Logging, LoggingMarkers, TransactionId}
+import whisk.connector.kafka.{KafkaConsumerConnector, KafkaProducerConnector}
+import whisk.core.WhiskConfig
+import whisk.core.WhiskConfig.{consulServer, kafkaHost, loadbalancerActivationCountBeforeNextInvoker}
+import whisk.core.connector.{ActivationMessage, CompletionMessage, PingMessage}
+import whisk.core.entity.{ActivationId, CodeExec, WhiskAction, WhiskActivation}
 
+import scala.collection.concurrent.TrieMap
+import scala.concurrent.duration.{DurationInt, FiniteDuration}
+import scala.concurrent.{ExecutionContext, Future, Promise, TimeoutException}
+import scala.util.{Failure, Success}
 trait LoadBalancer {
 
     /**
@@ -93,10 +84,19 @@ class LoadBalancerService(config: WhiskConfig)(implicit val actorSystem: ActorSy
             val subject = msg.user.subject.asString
             val entry = setupActivation(msg.activationId, subject, invokerName, timeout, transid)
             logging.info(this, s"posting topic '$topic' with activation id '${msg.activationId}'")
-            producer.send(topic, msg).map { status =>
-                transid.finished(this, start, s"Posted to ${status.topic()}[${status.partition()}][${status.offset()}]")
-                entry.promise.future
+//            producer.send(topic, msg).map { status =>
+//                transid.finished(this, start, s"Posted to ${status.topic()}[${status.partition()}][${status.offset()}]")
+//                entry.promise.future
+//            }
+            logging.info(this, "seding POST to invoker with " + msg.serialize)
+            val pipeline: HttpRequest => Future[WhiskActivation] = (
+                sendReceive
+                ~> unmarshal[WhiskActivation]
+              )
+            Future {
+                pipeline(Post("http://192.168.99.100:12001/invoke", msg))
             }
+
         }
     }
 

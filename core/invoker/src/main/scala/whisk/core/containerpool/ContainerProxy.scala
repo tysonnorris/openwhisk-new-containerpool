@@ -19,30 +19,20 @@ package whisk.core.containerpool
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 
-import scala.concurrent.Future
-import scala.concurrent.duration._
-import scala.util.Success
-import scala.util.Failure
-
-import akka.actor.FSM
-import akka.actor.Props
-import akka.actor.Stash
-import akka.actor.Status.{ Failure => FailureMessage }
+import akka.actor.Status.{Failure => FailureMessage}
+import akka.actor.{ActorRef, FSM, Props, Stash}
 import akka.pattern.pipe
-import spray.json._
 import spray.json.DefaultJsonProtocol._
+import spray.json._
 import whisk.common.TransactionId
 import whisk.core.connector.ActivationMessage
 import whisk.core.container.Interval
-import whisk.core.entity.ActivationLogs
-import whisk.core.entity.ActivationResponse
-import whisk.core.entity.ByteSize
-import whisk.core.entity.CodeExec
-import whisk.core.entity.EntityName
-import whisk.core.entity.Parameters
-import whisk.core.entity.WhiskActivation
+import whisk.core.entity._
 import whisk.core.entity.size._
-import whisk.core.entity.ExecutableWhiskAction
+
+import scala.concurrent.Future
+import scala.concurrent.duration._
+import scala.util.{Failure, Success}
 
 // States
 sealed trait ContainerState
@@ -63,7 +53,7 @@ case class WarmedData(container: Container, namespace: EntityName, action: Execu
 
 // Events received by the actor
 case class Start(exec: CodeExec[_])
-case class Run(action: ExecutableWhiskAction, msg: ActivationMessage)
+case class Run(action: ExecutableWhiskAction, msg: ActivationMessage, listener:Option[ActorRef])
 case object Remove
 
 // Events sent by the actor
@@ -320,7 +310,12 @@ class ContainerProxy(
         // and do not block further execution of the future. They are completely
         // asynchronous.
         activation.andThen {
-            case Success(activation) => sendActiveAck(tid, activation)
+            case Success(activation) => {
+                job.listener match {
+                    case Some(listener) => listener ! activation
+                    case _ => sendActiveAck(tid, activation)
+                }
+            }
         }.flatMap { activation =>
             val exec = job.action.exec.asInstanceOf[CodeExec[_]]
             container.logs(job.action.limits.logs.asMegaBytes, exec.sentinelledLogs).map { logs =>

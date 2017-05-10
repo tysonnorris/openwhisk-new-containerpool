@@ -16,16 +16,48 @@
 
 package whisk.core.invoker
 
-import akka.actor.Actor
+import akka.actor.{Actor, Props}
+import spray.httpx.SprayJsonSupport._
+import spray.routing.Route
+import whisk.common.{Logging, TransactionId}
+import whisk.core.connector.ActivationMessage
+import whisk.core.entity.WhiskActivation
 import whisk.http.BasicRasService
 
+import scala.concurrent.{ExecutionContext, Promise}
 /**
  * Implements web server to handle certain REST API calls.
  * Currently provides a health ping route, only.
  */
-trait InvokerServer
+class InvokerServer(invokerReactive: InvokerReactive, implicit val logging: Logging)
     extends BasicRasService
     with Actor {
+    private implicit val executionContext: ExecutionContext = context.dispatcher
 
     override def actorRefFactory = context
+    override def routes(implicit transid: TransactionId): Route = {
+        // handleRejections wraps the inner Route with a logical error-handler for unmatched paths
+        handleRejections(customRejectionHandler) {
+            super.routes ~ invokeRoute
+        }
+    }
+    private val invokeRoute = {
+        (path("invoke") & post) {
+            entity(as[ActivationMessage]) { msg =>
+                val activationPromise = Promise[WhiskActivation]
+                val listener = context.actorOf(Props(new Actor{
+                    override def receive: Receive = {
+                        case activation:WhiskActivation => {
+                            activationPromise.trySuccess(activation)
+                        }
+                    }
+                }), "listener-"+msg.activationId)
+                implicit val tid = msg.transid
+                invokerReactive.onMessage(msg, Some(listener))
+                complete {
+                    activationPromise.future
+                }
+            }
+        }
+    }
 }

@@ -17,36 +17,28 @@
 package whisk.core.invoker
 
 import java.nio.charset.StandardCharsets
+import java.time.{Clock, Instant}
 
-import java.time.{ Clock, Instant }
-
-import scala.concurrent.{ Await, ExecutionContext, Future }
-import scala.concurrent.Promise
-import scala.concurrent.duration.{ Duration, DurationInt }
-import scala.language.postfixOps
-import scala.util.{ Failure, Success }
-
-import akka.actor.{ ActorRef, ActorSystem, actorRef2Scala }
+import akka.actor.{ActorRef, ActorSystem, actorRef2Scala}
 import akka.japi.Creator
-import spray.json._
 import spray.json.DefaultJsonProtocol._
-import whisk.common.{ Counter, Logging, LoggingMarkers, TransactionId }
-import whisk.common.AkkaLogging
-import whisk.connector.kafka.{ KafkaConsumerConnector, KafkaProducerConnector }
+import spray.json._
+import whisk.common._
+import whisk.connector.kafka.{KafkaConsumerConnector, KafkaProducerConnector}
 import whisk.core.WhiskConfig
-import whisk.core.WhiskConfig.{ consulServer, dockerImagePrefix, dockerRegistry, kafkaHost, logsDir, servicePort, whiskVersion, invokerUseReactivePool }
-import whisk.core.connector.{ ActivationMessage, CompletionMessage }
+import whisk.core.WhiskConfig._
+import whisk.core.connector.{ActivationMessage, CompletionMessage, MessageProducer, PingMessage}
 import whisk.core.container._
-import whisk.core.dispatcher.{ Dispatcher, MessageHandler }
-import whisk.core.dispatcher.ActivationFeed.{ ActivationNotification, ContainerReleased, FailedActivation }
+import whisk.core.dispatcher.ActivationFeed.{ActivationNotification, ContainerReleased, FailedActivation}
+import whisk.core.dispatcher.{Dispatcher, MessageHandler}
 import whisk.core.entity._
-import whisk.http.BasicHttpService
-import whisk.http.Messages
+import whisk.http.{BasicHttpService, Messages}
 import whisk.utils.ExecutionContextFactory
-import whisk.common.Scheduler
-import whisk.core.connector.PingMessage
-import whisk.core.connector.MessageProducer
-import scala.util.Try
+
+import scala.concurrent.duration.{Duration, DurationInt}
+import scala.concurrent.{Await, ExecutionContext, Future, Promise}
+import scala.language.postfixOps
+import scala.util.{Failure, Success}
 
 /**
  * A kafka message handler that invokes actions as directed by message on topic "/actions/invoke".
@@ -75,7 +67,7 @@ class Invoker(
      * @param msg is the kafka message payload as Json
      * @param matches contains the regex matches
      */
-    override def onMessage(msg: ActivationMessage)(implicit transid: TransactionId): Future[DocInfo] = {
+    override def onMessage(msg: ActivationMessage, listener:Option[ActorRef] = None)(implicit transid: TransactionId): Future[DocInfo] = {
         require(msg != null, "message undefined")
         require(msg.action.version.isDefined, "action version undefined")
 
@@ -134,6 +126,72 @@ class Invoker(
 
         transactionPromise.future
     }
+
+    def invokeNode(msg: ActivationMessage)(implicit transid: TransactionId): Future[WhiskActivation] = {
+        require(msg != null, "message undefined")
+        require(msg.action.version.isDefined, "action version undefined")
+
+        val start = transid.started(this, LoggingMarkers.INVOKER_ACTIVATION)
+        val namespace = msg.action.path
+        val name = msg.action.name
+        val actionid = FullyQualifiedEntityName(namespace, name).toDocId.asDocInfo(msg.revision)
+        val tran = Transaction(msg)
+        val subject = msg.user.subject
+
+        logging.info(this, s"${actionid.id} $subject ${msg.activationId}")
+
+        // the activation must terminate with only one attempt to write an activation record to the datastore
+        // hence when the transaction is fully processed, this method will complete a promise with the datastore
+        // future writing back the activation record and for which there are three cases:
+        // 1. success: there were no exceptions and hence the invoke path operated normally,
+        // 2. error during invocation: an exception occurred while trying to run the action,
+        // 3. error fetching action: an exception occurred reading from the db, didn't get to run.
+        val transactionPromise = Promise[DocInfo]
+        val activationPromise = Promise[WhiskActivation]
+
+        // caching is enabled since actions have revision id and an updated
+        // action will not hit in the cache due to change in the revision id;
+        // if the doc revision is missing, then bypass cache
+        if (actionid.rev == DocRevision()) {
+            logging.error(this, s"revision was not provided for ${actionid.id}")
+        }
+
+
+        WhiskAction.get(entityStore, actionid.id, actionid.rev, fromCache = actionid.rev != DocRevision()) onComplete {
+            case Success(action) =>
+                // only Exec instances that are subtypes of CodeExec reach the invoker
+                assume(action.exec.isInstanceOf[CodeExec[_]])
+                invokeAction(tran, action) onComplete {
+                    case Success(activation) =>
+                        activationPromise.trySuccess(activation)
+                        transactionPromise.completeWith {
+                            // this completes the successful activation case (1)
+                            completeTransaction(tran, activation, ContainerReleased(transid))
+                        }
+
+                    case Failure(t) =>
+                        activationPromise.tryFailure(t)
+                        logging.info(this, s"activation failed")
+                        val failure = disambiguateActivationException(t, action)
+                        transactionPromise.completeWith {
+                            // this completes the failed activation case (2)
+                            completeTransactionWithError(action.docid, action.version, tran, failure.activationResponse, Some(action.limits))
+                        }
+                }
+
+            case Failure(t) =>
+                activationPromise.tryFailure(t)
+                logging.error(this, s"failed to fetch action from db: ${t.getMessage}")
+                val failureResponse = ActivationResponse.whiskError(s"Failed to fetch action.")
+                transactionPromise.completeWith {
+                    // this completes the failed to fetch case (3)
+                    completeTransactionWithError(actionid.id, msg.action.version.get, tran, failureResponse, None)
+                }
+        }
+
+        activationPromise.future
+    }
+
 
     /*
      * Creates a whisk activation out of the errorMsg and finish the transaction.
@@ -440,11 +498,12 @@ object Invoker {
             val producer = new KafkaProducerConnector(config.kafkaHost, ec)
             val dispatcher = new Dispatcher(consumer, 500 milliseconds, 2 * maxdepth, actorSystem)
 
-            val invoker = if (Try(config.invokerUseReactivePool.toBoolean).getOrElse(false)) {
-                new InvokerReactive(config, instance, dispatcher.activationFeed, producer)
-            } else {
-                new Invoker(config, instance, dispatcher.activationFeed, producer)
-            }
+//            val invoker = if (Try(config.invokerUseReactivePool.toBoolean).getOrElse(false)) {
+//
+//            } else {
+//                new Invoker(config, instance, dispatcher.activationFeed, producer)
+//            }
+            val invoker = new InvokerReactive(config, instance, dispatcher.activationFeed, producer)
             logger.info(this, s"using $invoker")
 
             dispatcher.addHandler(invoker, true)
@@ -458,7 +517,7 @@ object Invoker {
 
             val port = config.servicePort.toInt
             BasicHttpService.startService(actorSystem, "invoker", "0.0.0.0", port, new Creator[InvokerServer] {
-                def create = new InvokerServer {
+                def create = new InvokerServer(invoker, logger) {
                     override implicit val logging = logger
                 }
             })

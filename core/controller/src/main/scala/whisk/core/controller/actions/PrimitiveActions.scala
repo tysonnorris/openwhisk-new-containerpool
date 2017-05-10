@@ -16,29 +16,19 @@
 
 package whisk.core.controller.actions
 
-import scala.concurrent.ExecutionContext
-import scala.concurrent.Future
-import scala.concurrent.Promise
-import scala.concurrent.TimeoutException
-import scala.concurrent.duration._
-import scala.util.Failure
-import scala.util.Success
-
 import akka.actor.ActorSystem
-import spray.http.StatusCodes._
 import spray.json._
-import whisk.common.Logging
-import whisk.common.LoggingMarkers
-import whisk.common.StartMarker
-import whisk.common.TransactionId
+import whisk.common.{Logging, LoggingMarkers, StartMarker, TransactionId}
 import whisk.core.connector.ActivationMessage
-import whisk.core.controller.WhiskServices
-import whisk.core.controller.WhiskActionsApi
+import whisk.core.controller.{WhiskActionsApi, WhiskServices}
 import whisk.core.database.NoDocumentException
 import whisk.core.entity._
-import whisk.core.entity.types.ActivationStore
-import whisk.core.entity.types.EntityStore
+import whisk.core.entity.types.{ActivationStore, EntityStore}
 import whisk.utils.ExecutionContextFactory.FutureExtensions
+
+import scala.concurrent.{ExecutionContext, Future, Promise, TimeoutException}
+import scala.concurrent.duration._
+import scala.util.{Failure, Success}
 
 protected[actions] trait PrimitiveActions {
     /** The core collections require backend services to be injected in this trait. */
@@ -111,9 +101,12 @@ protected[actions] trait PrimitiveActions {
         postedFuture flatMap { activationResponse =>
             transid.finished(this, start)
             if (blocking) {
-                waitForActivationResponse(user, message.activationId, timeout, activationResponse) map {
-                    whiskActivation => (whiskActivation.activationId, Some(whiskActivation))
+                activationResponse map {
+                    whiskActivation => ((whiskActivation.activationId, Some(whiskActivation)))
                 }
+//                waitForActivationResponse(user, message.activationId, timeout, activationResponse) map {
+//                    whiskActivation => (whiskActivation.activationId, Some(whiskActivation))
+//                }
             } else {
                 // Duration of the non-blocking activation in Controller.
                 // We use the start time of the tid instead of a startMarker to avoid passing the start marker around.
