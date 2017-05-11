@@ -167,7 +167,7 @@ object ContainerPool {
      */
     def schedule[A](action: ExecutableWhiskAction, namespace: EntityName, idles: Map[A, WorkerData]): Option[A] = {
         idles.find {
-            case (_, WorkerData(WarmedData(_, `namespace`, `action`, _), Free)) => true
+            case (_, WorkerData(WarmedData(_, `namespace`, `action`, _), _)) => true
             case _ => false
         }.map(_._1)
     }
