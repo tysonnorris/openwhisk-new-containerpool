@@ -29,10 +29,25 @@ function NodeActionService(config, logger) {
     var server = undefined;
     var userCodeRunner = undefined;
 
+    var currentRequests = 0;
     function setStatus(newStatus) {
         if (status !== Status.stopped) {
-            status = newStatus;
+            //started 1 request!
+            if (newStatus == Status.running){
+              currentRequests++;
+            }
+            //completed 1 request!
+            if (status == Status.running && newStatus == Status.ready){
+                currentRequests--;
+            }
+            if (newStatus != Status.ready || currentRequests == 0) {
+                status = newStatus;
+            } else {
+            }
+            console.log("still running "+currentRequests+" requests...");
+            console.log("status is now:" + status);
         }
+
     }
 
     /**
@@ -104,7 +119,10 @@ function NodeActionService(config, logger) {
      * req.body = { value: Object, meta { activationId : int } }
      */
     this.runCode = function runCode(req) {
-        if (status === Status.ready) {
+        //if (status === Status.ready) {
+        if (status === Status.running) {
+            console.log("running activation concurrently...")
+        }
             setStatus(Status.running);
 
             return doRun(req).then(function (result) {
@@ -121,10 +139,10 @@ function NodeActionService(config, logger) {
 
                 return Promise.reject(errorMessage(500, "An error has occurred: " + error));
             });
-        } else {
-            logger.info('[runCode]', 'cannot schedule runCode due to status', status);
-            return Promise.reject(errorMessage(500, "Internal system error: container not ready, status: " + status));
-        }
+        // } else {
+        //     logger.info('[runCode]', 'cannot schedule runCode due to status', status);
+        //     return Promise.reject(errorMessage(500, "Internal system error: container not ready, status: " + status));
+        // }
     };
 
     function doInit(message) {

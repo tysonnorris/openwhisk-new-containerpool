@@ -16,7 +16,9 @@
 
 package whisk.core.invoker
 
-import akka.actor.{Actor, Props}
+import java.util.concurrent.atomic.AtomicInteger
+
+import akka.actor.Actor
 import spray.httpx.SprayJsonSupport._
 import spray.routing.Route
 import whisk.common.{Logging, TransactionId}
@@ -41,20 +43,33 @@ class InvokerServer(invokerReactive: InvokerReactive, implicit val logging: Logg
             super.routes ~ invokeRoute
         }
     }
+    private val requestCount = new AtomicInteger(0);
     private val invokeRoute = {
         (path("invoke") & post) {
             entity(as[ActivationMessage]) { msg =>
                 val activationPromise = Promise[WhiskActivation]
-                val listener = context.actorOf(Props(new Actor{
-                    override def receive: Receive = {
-                        case activation:WhiskActivation => {
-                            activationPromise.trySuccess(activation)
+//                val listener = context.actorOf(Props(new Actor{
+//                    override def receive: Receive = {
+//                        case activation:WhiskActivation => {
+//                            activationPromise.trySuccess(activation)
+//                        }
+//                    }
+//                }), "listener-"+msg.activationId)
+//                implicit val tid = msg.transid
+                logging.info(this, s"### starting request:${requestCount.incrementAndGet()}")
+                invokerReactive.onMessage(msg, Some(activationPromise))(msg.transid)
+                complete {
+                    activationPromise.future onSuccess {
+                        case _ => {
+                            logging.info(this, s"### ending successful request:${requestCount.decrementAndGet()}")
                         }
                     }
-                }), "listener-"+msg.activationId)
-                implicit val tid = msg.transid
-                invokerReactive.onMessage(msg, Some(listener))
-                complete {
+                    activationPromise.future onFailure {
+                        case _ => {
+                            logging.info(this, s"### ending failed request:${requestCount.decrementAndGet()}")
+                        }
+                    }
+
                     activationPromise.future
                 }
             }

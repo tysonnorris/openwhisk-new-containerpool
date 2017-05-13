@@ -51,6 +51,8 @@ class ContainerPool(
     val logging = new AkkaLogging(context.system.log)
 
     val pool = new mutable.HashMap[ActorRef, WorkerData]
+    val rtPool = new mutable.HashMap[ContainerProxy, WorkerData]
+    ContainerPool.rtPool = rtPool
     val prewarmedPool = new mutable.HashMap[ActorRef, WorkerData]
     val minimumRemovalAge = 1.seconds //min time since last use for removal eligibility
 
@@ -96,17 +98,20 @@ class ContainerPool(
             }
 
         // Container is free to take more work
-        case NeedWork(data: WarmedData) =>
+        case NeedWork(data: WarmedData, proxy:ContainerProxy) =>
             pool.update(sender(), WorkerData(data, Free))
+            logging.info(this, "adding to rtPool:"+data.container)
+            rtPool.update(proxy, WorkerData(data, Free))
             feed ! FreeWilly
 
         // Container is prewarmed and ready to take work
-        case NeedWork(data: PreWarmedData) =>
+        case NeedWork(data: PreWarmedData, proxy:ContainerProxy) =>
             prewarmedPool.update(sender(), WorkerData(data, Free))
 
         // Container got removed
         case ContainerRemoved =>
             pool.remove(sender())
+
     }
 
     /** Creates a new container and updates state accordingly. */
@@ -150,6 +155,9 @@ class ContainerPool(
 }
 
 object ContainerPool {
+
+    var rtPool:mutable.HashMap[ContainerProxy, WorkerData] = null
+
     /**
      * Finds the best container for a given job to run on.
      *
@@ -172,6 +180,12 @@ object ContainerPool {
         }.map(_._1)
     }
 
+//    def scheduleRt[A](action: ExecutableWhiskAction, namespace: EntityName): Option[A] = {
+//        (rtPool.toMap).find {
+//            case (_, WorkerData(WarmedData(_, `namespace`, `action`, _), _)) => true
+//            case _ => false
+//        }.map(_._1)
+//    }
     /**
      * Finds the best container to remove to make space for the job passed to run.
      *

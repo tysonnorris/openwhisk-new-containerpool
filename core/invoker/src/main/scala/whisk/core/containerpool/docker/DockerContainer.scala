@@ -16,31 +16,28 @@
 
 package whisk.core.containerpool.docker
 
-import scala.concurrent.Future
-import spray.json.JsObject
-import scala.concurrent.duration._
-import scala.concurrent.ExecutionContext
-import whisk.core.container.HttpUtils
-import whisk.core.entity.size._
-import scala.util.Success
-import scala.util.Failure
-import java.time.Instant
-import whisk.core.container.RunResult
-import whisk.core.container.Interval
-import spray.json._
-import spray.json.DefaultJsonProtocol._
-import whisk.common.TransactionId
-import whisk.common.Logging
-import whisk.common.LoggingMarkers
-import whisk.core.entity.ByteSize
 import java.nio.charset.StandardCharsets
-import whisk.http.Messages
-import whisk.core.entity.ActivationResponse
-import whisk.core.containerpool.BlackboxStartupError
-import whisk.core.containerpool.WhiskContainerStartupError
-import whisk.core.containerpool.InitializationError
-import whisk.core.containerpool.Container
+import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
+
+import akka.actor.ActorRefFactory
+import spray.client.pipelining._
+import spray.http.HttpRequest
+import spray.httpx.SprayJsonSupport._
+import spray.json.DefaultJsonProtocol._
+import spray.json.JsObject
+import whisk.common.{Logging, LoggingMarkers, TransactionId}
+import whisk.core.container.{HttpUtils, Interval, RunResult}
+import whisk.core.containerpool.{BlackboxStartupError, Container, InitializationError, WhiskContainerStartupError}
+import whisk.core.entity.ActivationResponse.ContainerResponse
+import whisk.core.entity.size._
+import whisk.core.entity.{ActivationResponse, ByteSize}
 import whisk.core.invoker.ActionLogDriver
+import whisk.http.Messages
+
+import scala.concurrent.duration._
+import scala.concurrent.{ExecutionContext, Future}
+import scala.util.{Failure, Success}
 
 object DockerContainer {
     /**
@@ -65,7 +62,7 @@ object DockerContainer {
                environment: Map[String, String] = Map(),
                network: String = "bridge",
                name: Option[String] = None)(
-                   implicit docker: DockerApiWithFileAccess, runc: RuncApi, ec: ExecutionContext, log: Logging) = {
+                   implicit docker: DockerApiWithFileAccess, runc: RuncApi, ec: ExecutionContext, log: Logging, actorFactory: ActorRefFactory) = {
         implicit val tid = transid
 
         val environmentArgs = (environment + ("SERVICE_IGNORE" -> true.toString)).map {
@@ -121,7 +118,7 @@ object DockerContainer {
  * @param ip the ip of the container
  */
 class DockerContainer(id: ContainerId, ip: ContainerIp)(
-    implicit docker: DockerApiWithFileAccess, runc: RuncApi, ec: ExecutionContext, log: Logging) extends Container with ActionLogDriver {
+    implicit docker: DockerApiWithFileAccess, runc: RuncApi, ec: ExecutionContext, log: Logging, actorFactory: ActorRefFactory) extends Container with ActionLogDriver {
 
     /** The last read-position in the log file */
     private var logFileOffset = 0L
@@ -162,7 +159,7 @@ class DockerContainer(id: ContainerId, ip: ContainerIp)(
 
         val parameterWrapper = JsObject("value" -> parameters)
         val body = JsObject(parameterWrapper.fields ++ environment.fields)
-        callContainer("/run", body, timeout, retry = false).andThen { // never fails
+            callContainer("/run", body, timeout, retry = false).andThen { // never fails
             case Success(r: RunResult) =>
                 transid.finished(this, start.copy(start = r.interval.start), s"running result: ${r.toBriefString}", endTime = r.interval.end)
             case Failure(t) =>
@@ -234,18 +231,32 @@ class DockerContainer(id: ContainerId, ip: ContainerIp)(
      * @param timeout timeout of the request
      * @param retry whether or not to retry the request
      */
-    protected def callContainer(path: String, body: JsObject, timeout: FiniteDuration, retry: Boolean = false): Future[RunResult] = {
+    val pipeline: HttpRequest => Future[String] = (
+      sendReceive
+        ~> unmarshal[String]
+      )
+    val requestCounter = new AtomicInteger(0)
+    protected def callContainer(path: String, body: JsObject, timeout: FiniteDuration, retry: Boolean = false)(implicit context:ActorRefFactory): Future[RunResult] = {
         val started = Instant.now()
-        val http = httpConnection.getOrElse {
-            val conn = new HttpUtils(s"${ip.asString}:8080", timeout, 1.MB)
-            httpConnection = Some(conn)
-            conn
-        }
-        Future {
-            http.post(path, body, retry)
-        }.map { response =>
+//        val http = httpConnection.getOrElse {
+//            val conn = new HttpUtils(s"${ip.asString}:8080", timeout, 1.MB)
+//            httpConnection = Some(conn)
+//            conn
+//        }
+//        Future {
+//            http.post(path, body, retry)
+//        }.map { response =>
+//            val finished = Instant.now()
+//            RunResult(Interval(started, finished), response)
+//        }
+//        see http://kamon.io/teamblog/2014/11/02/understanding-spray-client-timeout-settings/
+        log.info(this, s"###### starting request to container ${requestCounter.incrementAndGet()}")
+        val request = Post(s"http://${ip.asString}:8080${path}", body)
+        pipeline(request).map (responseBody => {
             val finished = Instant.now()
-            RunResult(Interval(started, finished), response)
-        }
+            log.info(this, s"###### ending request to container ${requestCounter.decrementAndGet()}")
+            RunResult(Interval(started, finished), Right(ContainerResponse(true, responseBody)))
+        })
+
     }
 }

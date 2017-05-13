@@ -16,13 +16,13 @@
 
 package whisk.core.containerpool
 
-import scala.concurrent.Future
 import spray.json.JsObject
 import whisk.common.TransactionId
-import scala.concurrent.duration.FiniteDuration
-import whisk.core.entity.ByteSize
 import whisk.core.container.Interval
-import whisk.core.entity.ActivationResponse
+import whisk.core.entity.{ActivationResponse, ByteSize}
+
+import scala.concurrent.Future
+import scala.concurrent.duration.FiniteDuration
 
 trait Container {
     /**

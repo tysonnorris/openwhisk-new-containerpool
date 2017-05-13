@@ -31,17 +31,15 @@ import whisk.core.containerpool.docker.DockerContainer
 import whisk.core.containerpool.docker.DockerClientWithFileAccess
 import whisk.core.containerpool.docker.RuncClient
 import whisk.core.container.{ContainerPool => OldContainerPool}
-import whisk.core.containerpool.Run
+import whisk.core.containerpool._
 import whisk.core.connector.MessageProducer
 import akka.actor.ActorRefFactory
-import whisk.core.containerpool.ContainerProxy
 
 import scala.concurrent.duration._
 import whisk.core.connector.CompletionMessage
 
 import scala.util.Success
 import scala.util.Failure
-import whisk.core.containerpool.PrewarmingConfig
 import whisk.core.container.Interval
 import spray.json._
 import spray.json.DefaultJsonProtocol._
@@ -113,14 +111,14 @@ class InvokerReactive(
         new CodeExecAsString(manifest, "", None)
     }.get
 
-    val childFactory = (f: ActorRefFactory) => f.actorOf(ContainerProxy.props(containerFactory, ack, store))
-    val pool = actorSystem.actorOf(whisk.core.containerpool.ContainerPool.props(
+    val childFactory = (f: ActorRefFactory) => f.actorOf(ContainerProxy.props(containerFactory, ack, store, pool))
+    val pool:ActorRef = actorSystem.actorOf(whisk.core.containerpool.ContainerPool.props(
         childFactory,
         OldContainerPool.getDefaultMaxActive(config),
         activationFeed,
         Some(PrewarmingConfig(2, prewarmExec))))
 
-    def onMessage(msg: ActivationMessage,listener:Option[ActorRef] = None)(implicit transid: TransactionId): Future[Unit] = {
+    def onMessage(msg: ActivationMessage,listener:Option[Promise[WhiskActivation]] = None)(implicit transid: TransactionId): Future[Unit] = {
         require(msg != null, "message undefined")
         require(msg.action.version.isDefined, "action version undefined")
 
@@ -143,7 +141,8 @@ class InvokerReactive(
         WhiskAction.get(entityStore, actionid.id, actionid.rev, fromCache = actionid.rev != DocRevision()).map { action =>
             // only Exec instances that are subtypes of CodeExec reach the invoker
             assume(action.exec.isInstanceOf[CodeExec[_]])
-            pool ! Run(action.toExecutableWhiskAction, msg, listener)
+            //pool ! Run(action.toExecutableWhiskAction, msg, listener)
+            run(Run(action.toExecutableWhiskAction, msg, listener))
         }.recover {
             case _ =>
                 val interval = Interval.zero
@@ -165,6 +164,32 @@ class InvokerReactive(
 
                 ack(msg.transid, activation)
                 store(msg.transid, activation)
+        }
+    }
+    def run(r:Run)(implicit transid: TransactionId): Unit ={
+        r.listener match {
+            case Some(listener) => {
+                logging.info(this, "checking for rtpool action")
+                ContainerPool.schedule(r.action, r.msg.user.namespace, ContainerPool.rtPool.toMap) match {
+                    case Some(cont) => {
+                        logging.info(this, "found rtpool action: "+ cont)
+
+                        ContainerPool.rtPool(cont).data match {
+                            case w:WarmedData => {
+                                logging.info(this, "running rtpool action with container: "+ w.container)
+                                cont.run(w.container, r)
+                            }
+                            case _ => logging.error(this, "unexpected data type in rtPool:"+ContainerPool.rtPool(cont).data)
+                        }
+
+                    }
+                    case _ => {
+                        logging.info(this, "no container found in rtpool...")
+                        pool ! r
+                    }
+                }
+            }
+            case _ => pool ! r
         }
     }
 }

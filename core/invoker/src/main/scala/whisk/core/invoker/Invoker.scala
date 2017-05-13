@@ -67,7 +67,7 @@ class Invoker(
      * @param msg is the kafka message payload as Json
      * @param matches contains the regex matches
      */
-    override def onMessage(msg: ActivationMessage, listener:Option[ActorRef] = None)(implicit transid: TransactionId): Future[DocInfo] = {
+    override def onMessage(msg: ActivationMessage, listener:Option[Promise[WhiskActivation]] = None)(implicit transid: TransactionId): Future[DocInfo] = {
         require(msg != null, "message undefined")
         require(msg.action.version.isDefined, "action version undefined")
 

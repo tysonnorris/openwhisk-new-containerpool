@@ -30,8 +30,8 @@ import whisk.core.container.Interval
 import whisk.core.entity._
 import whisk.core.entity.size._
 
-import scala.concurrent.Future
 import scala.concurrent.duration._
+import scala.concurrent.{Future, Promise}
 import scala.util.{Failure, Success}
 
 // States
@@ -53,11 +53,11 @@ case class WarmedData(container: Container, namespace: EntityName, action: Execu
 
 // Events received by the actor
 case class Start(exec: CodeExec[_])
-case class Run(action: ExecutableWhiskAction, msg: ActivationMessage, listener:Option[ActorRef])
+case class Run(action: ExecutableWhiskAction, msg: ActivationMessage, listener:Option[Promise[WhiskActivation]])
 case object Remove
 
 // Events sent by the actor
-case class NeedWork(data: ContainerData)
+case class NeedWork(data: ContainerData, proxy:ContainerProxy)
 case object ContainerPaused
 case object ContainerRemoved
 
@@ -83,7 +83,8 @@ case object ContainerRemoved
 class ContainerProxy(
     factory: (TransactionId, String, CodeExec[_], ByteSize) => Future[Container],
     sendActiveAck: (TransactionId, WhiskActivation) => Future[Any],
-    storeActivation: (TransactionId, WhiskActivation) => Future[Any]) extends FSM[ContainerState, ContainerData] with Stash {
+    storeActivation: (TransactionId, WhiskActivation) => Future[Any],
+    pool:ActorRef) extends FSM[ContainerState, ContainerData] with Stash {
     implicit val ec = context.system.dispatcher
 
     val unusedTimeout = 30.seconds
@@ -136,12 +137,12 @@ class ContainerProxy(
     when(Starting) {
         // container was successfully obtained
         case Event(data: PreWarmedData, _) =>
-            context.parent ! NeedWork(data)
+            pool ! NeedWork(data, this)
             goto(Started) using data
 
         // container creation failed
         case Event(_: FailureMessage, _) =>
-            context.parent ! ContainerRemoved
+            pool ! ContainerRemoved
             stop()
 
         case _ => delay
@@ -166,7 +167,7 @@ class ContainerProxy(
 
         // Run was successful
         case Event(data: WarmedData, _) =>
-            context.parent ! NeedWork(data)
+            pool ! NeedWork(data, this)
             goto(Ready) using data
 
         // Failed after /init (the first run failed)
@@ -177,7 +178,7 @@ class ContainerProxy(
 
         // Failed at getting a container for a cold-start run
         case Event(_: FailureMessage, _) =>
-            context.parent ! ContainerRemoved
+            pool ! ContainerRemoved
             stop()
 
         case _ => delay
@@ -194,15 +195,17 @@ class ContainerProxy(
 
         // pause grace timed out
         case Event(StateTimeout, data: WarmedData) =>
-            data.container.halt()(TransactionId.invokerNanny).map(_ => ContainerPaused).pipeTo(self)
-            goto(Pausing)
+//            data.container.halt()(TransactionId.invokerNanny).map(_ => ContainerPaused).pipeTo(self)
+//            goto(Pausing)
+            //logging.info(this, "skipping pause...")
+            goto(Ready) using data
 
         case Event(Remove, data: WarmedData) => destroyContainer(data.container)
     }
 
     when(Pausing) {
         case Event(ContainerPaused, data: WarmedData) =>
-            context.parent ! NeedWork(data)
+            pool ! NeedWork(data, this)
             goto(Paused)
 
         case Event(_: FailureMessage, data: WarmedData) => destroyContainer(data.container)
@@ -219,14 +222,16 @@ class ContainerProxy(
 
             goto(Running)
 
-        // timeout or removing
-        case Event(StateTimeout | Remove, data: WarmedData) => destroyContainer(data.container)
+//        // timeout or removing
+//        case Event(StateTimeout | Remove, data: WarmedData) => {
+//            destroyContainer(data.container)
+//        }
     }
 
     when(Removing) {
         case Event(job: Run, _) =>
             // Send the job back to the pool to be rescheduled
-            context.parent ! job
+            pool ! job
             stay
         case Event(ContainerRemoved, _) => stop()
     }
@@ -253,7 +258,7 @@ class ContainerProxy(
      * @param container the container to destroy
      */
     def destroyContainer(container: Container) = {
-        context.parent ! ContainerRemoved
+        pool ! ContainerRemoved
 
         val unpause = stateName match {
             case Paused => container.resume()(TransactionId.invokerNanny)
@@ -311,16 +316,18 @@ class ContainerProxy(
         // asynchronous.
         activation.andThen {
             case Success(activation) => {
+                //send to the listener OR activeAck
                 job.listener match {
-                    case Some(listener) => listener ! activation
+                    case Some(listener) => listener.trySuccess(activation)
                     case _ => sendActiveAck(tid, activation)
                 }
             }
-        }.flatMap { activation =>
-            val exec = job.action.exec.asInstanceOf[CodeExec[_]]
-            container.logs(job.action.limits.logs.asMegaBytes, exec.sentinelledLogs).map { logs =>
-                activation.withLogs(ActivationLogs(logs))
-            }
+            //skip logs for now
+//        }.flatMap { activation =>
+//            val exec = job.action.exec.asInstanceOf[CodeExec[_]]
+//            container.logs(job.action.limits.logs.asMegaBytes, exec.sentinelledLogs).map { logs =>
+//                activation.withLogs(ActivationLogs(logs))
+//            }
         }.andThen {
             case Success(activation) => storeActivation(tid, activation)
         }.flatMap { activation =>
@@ -335,7 +342,8 @@ class ContainerProxy(
 object ContainerProxy {
     def props(factory: (TransactionId, String, CodeExec[_], ByteSize) => Future[Container],
               ack: (TransactionId, WhiskActivation) => Future[Any],
-              store: (TransactionId, WhiskActivation) => Future[Any]) = Props(new ContainerProxy(factory, ack, store))
+              store: (TransactionId, WhiskActivation) => Future[Any],
+              pool:ActorRef) = Props(new ContainerProxy(factory, ack, store, pool))
 
     // Needs to be threadsafe as it's used by multiple proxys concurrently.
     private val count = new AtomicInteger(0)
