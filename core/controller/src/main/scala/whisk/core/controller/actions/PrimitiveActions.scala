@@ -100,9 +100,15 @@ protected[actions] trait PrimitiveActions {
         val postedFuture = loadBalancer.publish(action, message, activeAckTimeout)
         postedFuture flatMap { activationResponse =>
             transid.finished(this, start)
+            //activation was submitted to invoker, but no response yet
             if (blocking) {
+                val start2 = transid.started(this, LoggingMarkers.CONTROLLER_LOGIC("waitingResponse"), s"waiting for: ${message.activationId}")
                 activationResponse map {
-                    whiskActivation => ((whiskActivation.activationId, Some(whiskActivation)))
+                    //response has been received
+                    whiskActivation => {
+                        transid.finished(this, start2, s"received response for :${message.activationId}")
+                        (whiskActivation.activationId, Some(whiskActivation))
+                    }
                 }
 //                waitForActivationResponse(user, message.activationId, timeout, activationResponse) map {
 //                    whiskActivation => (whiskActivation.activationId, Some(whiskActivation))

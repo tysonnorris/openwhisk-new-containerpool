@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import akka.actor.{ActorRefFactory, ActorSystem}
 import akka.pattern.ask
 import akka.util.Timeout
-import spray.client.pipelining._
+import spray.client.pipelining.{unmarshal, _}
 import spray.http.HttpRequest
 import spray.httpx.SprayJsonSupport._
 import whisk.common.{ConsulClient, Logging, LoggingMarkers, TransactionId}
@@ -36,6 +36,8 @@ import scala.collection.concurrent.TrieMap
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 import scala.concurrent.{ExecutionContext, Future, Promise, TimeoutException}
 import scala.util.{Failure, Success}
+
+
 trait LoadBalancer {
 
     /**
@@ -72,32 +74,41 @@ class LoadBalancerService(config: WhiskConfig)(implicit val actorSystem: ActorSy
     private val activationCountBeforeNextInvoker = Math.max(1, config.loadbalancerActivationCountBeforeNextInvoker)
     logging.info(this, s"activationCountBeforeNextInvoker = $activationCountBeforeNextInvoker")
 
-    override def getActiveUserActivationCounts: Map[String, Int] = activationBySubject.toMap mapValues { _.size }
+    override def getActiveUserActivationCounts: Map[String, Int] = activationBySubject.toMap mapValues {
+        _.size
+    }
 
     /** Gets a producer which can publish messages to the kafka bus. */
     private val producer = new KafkaProducerConnector(config.kafkaHost, executionContext)
+
+
+    val pipeline: HttpRequest => Future[WhiskActivation] = (
+      sendReceive
+        ~> unmarshal[WhiskActivation]
+      )
+
     override def publish(action: WhiskAction, msg: ActivationMessage, timeout: FiniteDuration)(
         implicit transid: TransactionId): Future[Future[WhiskActivation]] = {
-        chooseInvoker(action, msg).flatMap { invokerName =>
+        //TODO: make invoker selection FAST (currently disabled completely...)
+//        chooseInvoker(action, msg).flatMap { invokerName =>
+
             val start = transid.started(this, LoggingMarkers.CONTROLLER_KAFKA)
-            val topic = invokerName
-            val subject = msg.user.subject.asString
-            val entry = setupActivation(msg.activationId, subject, invokerName, timeout, transid)
-            logging.info(this, s"posting topic '$topic' with activation id '${msg.activationId}'")
+//            val topic = invokerName
+
+//            val subject = msg.user.subject.asString
+//            val entry = setupActivation(msg.activationId, subject, invokerName, timeout, transid)
+//            logging.info(this, s"posting topic '$topic' with activation id '${msg.activationId}'")
 //            producer.send(topic, msg).map { status =>
 //                transid.finished(this, start, s"Posted to ${status.topic()}[${status.partition()}][${status.offset()}]")
 //                entry.promise.future
 //            }
             logging.info(this, "seding POST to invoker with " + msg.serialize)
-            val pipeline: HttpRequest => Future[WhiskActivation] = (
-                sendReceive
-                ~> unmarshal[WhiskActivation]
-              )
+
             Future {
                 pipeline(Post("http://192.168.99.100:12001/invoke", msg))
             }
 
-        }
+//        }
     }
 
     /**

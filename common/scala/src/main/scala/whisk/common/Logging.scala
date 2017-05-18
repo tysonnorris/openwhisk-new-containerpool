@@ -211,6 +211,8 @@ object LoggingMarkers {
     // Time that is needed to produce message in kafka
     val CONTROLLER_KAFKA = LogMarkerToken(controller, kafka, start)
 
+    def CONTROLLER_LOGIC (block :String) = LogMarkerToken(controller, s"controllerLogic.${block}", start)
+
     /*
      * Invoker related markers
      */

@@ -136,9 +136,15 @@ class ContainerProxy(
 
     when(Starting) {
         // container was successfully obtained
-        case Event(data: PreWarmedData, _) =>
-            pool ! NeedWork(data, this)
-            goto(Started) using data
+        case Event(data: PreWarmedData, other) =>
+            //TODO: clean up the pool/proxy init order issue
+            if (pool == null) {
+                self ! Event(data, other)
+                stay()
+            } else {
+                pool ! NeedWork(data, this)
+                goto(Started) using data
+            }
 
         // container creation failed
         case Event(_: FailureMessage, _) =>
